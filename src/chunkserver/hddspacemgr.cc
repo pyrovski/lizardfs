@@ -1160,7 +1160,7 @@ static inline int hdd_int_chunk_readcrc(MooseFSChunk *c, uint32_t chunk_version)
 	uint8_t *crc_data = gOpenChunks.getResource(c->fd).crc_data();
 #ifndef ENABLE_CRC /* if NOT defined */
 	for (int i = 0; i < MFSBLOCKSINCHUNK; ++i) {
-		memcpy(crc_data + i * sizeof(uint32_t), &emptyblockcrc, sizeof(uint32_t));
+	  ((uint32_t*)crc_data)[i] = emptyblockcrc;
 	}
 #else /* if ENABLE_CRC defined */
 	int ret;
