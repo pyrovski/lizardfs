@@ -111,7 +111,6 @@
 #cmakedefine LIZARDFS_HAVE_FALLOC_FL_PUNCH_HOLE_IN_LINUX_FALLOC_H
 
 /* [CMake] Other */
-#cmakedefine HAVE_CRCUTIL
 #cmakedefine WORDS_BIGENDIAN
 #cmakedefine ENABLE_EXIT_ON_USR1
 #cmakedefine LIZARDFS_ENABLE_DEBUG_LOG

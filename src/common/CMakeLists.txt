@@ -16,12 +16,6 @@ endif()
 
 
 shared_add_library(mfscommon ${COMMON_SOURCES})
-if (HAVE_CRCUTIL)
-  # Use crcutil Library
-  include_directories(${CRCUTIL_INCLUDE_DIRS})
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CRCUTIL_CXX_FLAGS}")
-  shared_target_link_libraries(mfscommon ${CRCUTIL_LIBRARIES})
-endif()
 if (ZLIB_FOUND)
   shared_target_link_libraries(mfscommon ${ZLIB_LIBRARIES})
 endif()

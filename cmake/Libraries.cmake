@@ -83,31 +83,6 @@ else()
   message(STATUS "   to point this path (cmake -DPolonaise_DIR=...)")
 endif()
 
-# Find crcutil
-if(NOT BIG_ENDIAN)
-  INCLUDE(FindPkgConfig)
-  pkg_check_modules(CRCUTIL libcrcutil)
-  if(CRCUTIL_FOUND)
-    message(STATUS "Found libcrcutil")
-    set(HAVE_CRCUTIL 1)
-  else()
-    message(STATUS "Could NOT find system libcrcutil (but it's not required)")
-    set(CRCUTIL_VERSION crcutil-1.0)
-    message(STATUS "Using bundled ${CRCUTIL_VERSION}")
-    set(HAVE_CRCUTIL 1)
-    set(CRCUTIL_LIBRARIES "crcutil")
-    set(CRCUTIL_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/external/${CRCUTIL_VERSION}/code)
-    set(CRCUTIL_SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/${CRCUTIL_VERSION}/code)
-
-    if(CXX_HAS_MCRC32)
-      set(CRCUTIL_CXX_FLAGS "-mcrc32")
-    else()
-      set(CRCUTIL_CXX_FLAGS "")
-    endif()
-
-  endif()
-endif()
-
 # Find GoogleTest
 if(ENABLE_TESTS)
   set(GTEST_INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/external/${GTEST_DIR_NAME}/include)
