@@ -12,7 +12,7 @@ add_executable(mfschunkserver ${MAIN_SRC})
 target_link_libraries(mfschunkserver chunkserver ${PAM_LIBRARIES})
 
 if(SYSTEMD_FOUND)
-  target_link_libraries(mfschunkserver ${SYSTEMD_LIBRARIES})
+  target_link_libraries(mfschunkserver ${SYSTEMD_LIBRARIES} pthread)
 endif()
 
 install(TARGETS mfschunkserver RUNTIME DESTINATION ${SBIN_SUBDIR})
