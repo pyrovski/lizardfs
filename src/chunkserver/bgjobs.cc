@@ -256,6 +256,7 @@ void* job_worker(void *th_arg) {
 					}
 				}
 
+				// TODO(peb): mmap
 				status = hdd_read(rdargs->chunkid, rdargs->version, rdargs->chunkType,
 						rdargs->offset, rdargs->size, rdargs->maxBlocksToBeReadBehind,
 						rdargs->blocksToBeReadAhead, rdargs->outputBuffer);
