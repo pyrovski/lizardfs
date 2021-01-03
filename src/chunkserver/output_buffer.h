@@ -40,14 +40,17 @@ public:
 
 	OutputBuffer() = default;
 	~OutputBuffer();
-	
-	// Prefer mapping extant data over copying.
+
+	// Maps data into the buffer without copying.
+	// Mapped data must outlive the buffer.
 	ssize_t mapIntoBuffer(const void *mem, size_t len);
 
 	// Copies (appends) 'len' bytes at offset 'offset' from 'inputFileDescriptor'.
 	// Returns the number of bytes written.
-    // TODO(peb): remove this function.
-	// ssize_t copyIntoBuffer(int inputFileDescriptor, size_t len, off_t* offset);
+	// Prefer mapping extant data over copying.
+	// TODO(peb): is this ever called with non-nullptr 'offset'? The function
+	// was broken for short reads.
+	ssize_t copyIntoBuffer(int inputFileDescriptor, size_t len, off_t* offset);
 
 	// Returns the number of bytes written.
 	ssize_t copyIntoBuffer(const void *mem, size_t len);

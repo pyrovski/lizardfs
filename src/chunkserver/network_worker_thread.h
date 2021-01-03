@@ -59,6 +59,8 @@ struct packetstruct {
 	packetstruct *next;
 	uint8_t *startptr;
 	uint32_t bytesleft;
+    // TODO(peb): use an OutputBuffer for 'packet'? OutputBuffer now supports
+    // unowned buffers.
 	uint8_t *packet;
 	std::unique_ptr<OutputBuffer> outputBuffer;
 

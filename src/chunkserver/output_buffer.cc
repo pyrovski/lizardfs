@@ -122,11 +122,33 @@ size_t OutputBuffer::bytesInABuffer() const {
 	return size_ - bufferUnflushedDataFirstOffset_;
 }
 
+ssize_t OutputBuffer::copyIntoBuffer(int inputFileDescriptor, size_t len, off_t* offset) {
+  buffers_.emplace_back(malloc(len), len);
+  const struct iovec & iov = buffers_.back();
+  sassert(iov.iov_base);
+  owned_.emplace_back(true);
+  off_t lOffset = offset != nullptr ? *offset : 0;
+  size_t bytesRead = 0;
+  while (len > 0) {
+	ssize_t ret = pread(inputFileDescriptor, static_cast<uint8_t*>iov.iov_base + bytesRead, len, lOffset);
+		if (ret <= 0) {
+		  iov.iov_base = realloc(iov.iov_base, bytesRead);
+		  eassert(iov.iov_base);
+		  return bytesRead;
+		}
+		lOffset += ret;
+		len -= ret;
+		size_ += ret;
+		bytesRead += ret;
+	}
+	return bytesRead;
+}
+
 ssize_t OutputBuffer::copyIntoBuffer(const void *mem, size_t len) {
   sassert(owned_.size() == buffers_.size());
   buffers_.emplace_back(malloc(len), len);
   const struct iovec & iov = buffers_.back();
-  sassert(iov.iov_base != nullptr);
+  eassert(iov.iov_base);
   owned_.push_back(true);
   memcpy((void*)iov.iov_base, mem, len);
   size_ += len;
