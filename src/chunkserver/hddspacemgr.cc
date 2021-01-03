@@ -1448,6 +1448,7 @@ int hdd_read_crc_and_block(Chunk* c, uint16_t blocknum, OutputBuffer* outputBuff
 			outputBuffer->copyIntoBuffer(crc_data, sizeof(uint32_t));
 			// TODO(peb): mmap
 			bytesRead = outputBuffer->copyIntoBuffer(c->fd, MFSBLOCKSIZE, &off);
+			// TODO(peb): call mycrc32() directly on the mmap()ed file
 			if (bytesRead == toBeRead && !outputBuffer->checkCRC(bytesRead, get32bit(&crc_data))) {
 				hdd_test_chunk(ChunkWithVersionAndType{c->chunkid, c->version, c->type()});
 				return LIZARDFS_ERROR_CRC;
@@ -1483,6 +1484,7 @@ int hdd_read_crc_and_block(Chunk* c, uint16_t blocknum, OutputBuffer* outputBuff
 			    // TODO(peb): mmap
 				bytesRead = outputBuffer->copyIntoBuffer(c->fd, kHddBlockSize, &off);
 				const uint8_t *crc = crcBuff;
+				// TODO(peb): call mycrc32() directly on the mmap()ed file
 				if (bytesRead == toBeRead && !outputBuffer->checkCRC(bytesRead - 4, get32bit(&crc))) {
 					hdd_test_chunk(ChunkWithVersionAndType{c->chunkid, c->version, c->type()});
 					return LIZARDFS_ERROR_CRC;

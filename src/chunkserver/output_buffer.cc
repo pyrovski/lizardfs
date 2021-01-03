@@ -122,20 +122,6 @@ size_t OutputBuffer::bytesInABuffer() const {
 	return size_ - bufferUnflushedDataFirstOffset_;
 }
 
-// TODO(peb): this function is only called from hdd_read_crc_and_block();
-// it can be simplified after hdd_read_crc_and_block() is rewritten
-// for mmap(). hdd_read_crc_and_block() only calls checkCRC() on full blocks.
-bool OutputBuffer::checkCRC(size_t bytes, uint32_t crc) const {
-  // TODO(peb): rewrite
-  // TODO(peb): move to crc.cc
-	assert(size_ >= bytes);
-	if (size_ == 0) {
-	  return 0;
-	}
-	// TODO(peb): find the last 'bytes' bytes of the output buffer.
-	//return mycrc32(0, &buffer_[size__ - bytes], bytes) == crc;
-}
-
 ssize_t OutputBuffer::copyIntoBuffer(const void *mem, size_t len) {
   sassert(owned_.size() == buffers_.size());
   buffers_.emplace_back(malloc(len), len);

@@ -52,8 +52,11 @@ public:
 	// Returns the number of bytes written.
 	ssize_t copyIntoBuffer(const void *mem, size_t len);
 
+	// TODO(peb): this function is only called from hdd_read_crc_and_block();
+	// it can be simplified after hdd_read_crc_and_block() is rewritten
+	// for mmap(). hdd_read_crc_and_block() only calls checkCRC() on full blocks.
 	// Returns whether the CRC32 of the 'bytes' bytes at 'bufferUnflushedDataFirstIndex_' matches 'crc'.
-	bool checkCRC(size_t bytes, uint32_t crc) const;
+	//bool checkCRC(size_t bytes, uint32_t crc) const;
 
 	// Returns the number of bytes copied; i.e., the length of 'mem'.
 	ssize_t copyIntoBuffer(const std::vector<uint8_t>& mem) {
@@ -64,8 +67,11 @@ public:
 
 	// Returns the number of unflushed bytes in the buffer.
 	size_t bytesInABuffer() const;
+
+	// TODO(peb): remove; used in ChunkReplicator::getChunkBlocks(),
+	// hdd_read().
 	const uint8_t* data() const {
-		return buffer_.data();
+	  return buffer_.data();
 	}
 
 private:
