@@ -25,7 +25,11 @@
 #include <cstring>
 #include <vector>
 #include <sys/types.h>
+#include <sys/uio.h>
 
+// Holds pointers to owned an unowned memory blocks. Only frees owned blocks
+// on destruction. Data in an OutputBuffer is read-only append-only until it is
+// destroyed.
 class OutputBuffer {
 public:
 	enum WriteStatus {
@@ -34,29 +38,42 @@ public:
 		WRITE_ERROR
 	};
 
-	OutputBuffer(size_t internalBufferCapacity);
+	OutputBuffer() = default;
 	~OutputBuffer();
+	
+	// Prefer mapping extant data over copying.
+	ssize_t mapIntoBuffer(const void *mem, size_t len);
 
-	ssize_t copyIntoBuffer(int inputFileDescriptor, size_t len, off_t* offset);
+	// Copies (appends) 'len' bytes at offset 'offset' from 'inputFileDescriptor'.
+	// Returns the number of bytes written.
+    // TODO(peb): remove this function.
+	// ssize_t copyIntoBuffer(int inputFileDescriptor, size_t len, off_t* offset);
+
+	// Returns the number of bytes written.
 	ssize_t copyIntoBuffer(const void *mem, size_t len);
 
+	// Returns whether the CRC32 of the 'bytes' bytes at 'bufferUnflushedDataFirstIndex_' matches 'crc'.
 	bool checkCRC(size_t bytes, uint32_t crc) const;
 
+	// Returns the number of bytes copied; i.e., the length of 'mem'.
 	ssize_t copyIntoBuffer(const std::vector<uint8_t>& mem) {
 		return copyIntoBuffer(mem.data(), mem.size());
 	}
 
 	WriteStatus writeOutToAFileDescriptor(int outputFileDescriptor);
 
+	// Returns the number of unflushed bytes in the buffer.
 	size_t bytesInABuffer() const;
 	const uint8_t* data() const {
 		return buffer_.data();
 	}
-	void clear();
 
 private:
-	const size_t internalBufferCapacity_;
-	std::vector<uint8_t> buffer_;
-	size_t bufferUnflushedDataFirstIndex_;
-	size_t bufferUnflushedDataOneAfterLastIndex_;
+	std::vector<struct iovec> buffers_;
+	// owned_[i] is true if this object owns buffers_[i]. Should always be the same length as 'buffers_'.
+	std::vector<bool> owned_; 
+	// Offset of the first unflushed byte in the buffer's virtual array.
+	size_t bufferUnflushedDataFirstOffset_ = 0;
+	// Total size in bytes of all owned an unowned buffers.
+	size_t size_ = 0;
 };

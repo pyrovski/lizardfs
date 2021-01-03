@@ -25,75 +25,133 @@
 #include <cstdint>
 #include <ios>
 #include <stdexcept>
+#include <sys/uio.h>
 
 #include "chunkserver/output_buffer.h"
 #include "common/crc.h"
 #include "common/massert.h"
 #include "devtools/request_log.h"
 
-OutputBuffer::OutputBuffer(size_t internalBufferCapacity)
-	: internalBufferCapacity_(internalBufferCapacity),
-	  buffer_(internalBufferCapacity, 0),
-	  bufferUnflushedDataFirstIndex_(0),
-	  bufferUnflushedDataOneAfterLastIndex_(0)
-{
-	eassert(internalBufferCapacity > 0);
-	buffer_.reserve(internalBufferCapacity_);
+// TODO(peb): investigate TCP cork
+OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFileDescriptor) {
+  sassert(owned_.size() == buffers_.size());
+  sassert(bufferUnflushedDataFirstOffset_ <= size_);
+  if (bufferUnflushedDataFirstOffset_ == size_) {
+	return WRITE_DONE;
+  }
+  // We have at least one byte to write.
+  // Find first unflushed iovec
+  size_t unflushedIndex = 0;
+  // Virtual offset of buffers_[unflushedIndex]
+  size_t unflushedOffset = 0;
+  while (unflushedOffset < bufferUnflushedDataFirstOffset_ && unflushedIndex < buffers_.size()) {
+	if (bufferUnflushedDataFirstOffset_ < unflushedOffset + buffers_[unflushedIndex].iov_len) {
+	  // bufferUnflushedDataFirstOffset_ is in this iovec.
+	  break;
+	}
+	unflushedOffset += buffers_[unflushedIndex].iov_len;
+	++unflushedIndex;
+  }
+  // 'unflushedOffset' is the virtual offset corresponding to the start of buffers_[offset_index].
+  if (unflushedIndex >= buffers_.size()) {
+	// Did not find the requisite iovec.
+	return WRITE_ERROR;
+  }
+  while (bufferUnflushedDataFirstOffset_ < size_) {
+	if (unflushedOffset < bufferUnflushedDataFirstOffset_) {
+	  // We need to issue a partial iovec write or modify the iovec.
+	  // If we own the data, we can't modify the iovec because we have to free the
+	  // memory later. If we don't own the data, just modify the iovec; OutBuffers
+	  // don't allow access to bytes behind the first unflushed offset.
+	  const struct iovec & iov = buffers_[unflushedIndex];
+	  // Offset within 'iov' of the first unflushed byte.
+	  const size_t iovOffset = bufferUnflushedDataFirstOffset_ - unflushedOffset;
+	  sassert(iovOffset < iov.iov_len);
+	  if (owned_[unflushedIndex]) {
+		// TODO(peb): if we create iovecs on demand,
+		// we don't need this special handling.
+		const ssize_t expectedBytes = iov.iov_len - iovOffset;
+		const ssize_t bytesWritten = ::write(outputFileDescriptor, iov.iov_base + iovOffset, iov.iov_len - iovOffset);
+		if (bytesWritten <= 0) {
+		  if (bytesWritten == 0 || errno == EAGAIN) {
+			return WRITE_AGAIN;
+		  }
+		  return WRITE_ERROR;
+		}
+		bufferUnflushedDataFirstOffset_ += bytesWritten;
+		if (bytesWritten == expectedBytes) {
+		  ++unflushedIndex;
+		  unflushedOffset += iovec.iov_len;
+		} // if bytesWritten < expectedBytes, we'll pick up from bufferUnflushedDataFirstOffset_.
+	  } else {
+		iov.iov_base += iovOffset;
+		iov.iov_len -= iovOffset;
+	  }
+	}
+	const ssize_t expectedBytes = size_ - unflushedOffset;
+	const ssize_t bytesWritten = writev(outputFileDescriptor,
+										&buffers_[unflushedIndex],
+										buffers_.size() - unflushedIndex);
+	if (bytesWritten <= 0) {
+	  if (bytesWritten == 0 || errno == EAGAIN) {
+		return WRITE_AGAIN;
+	  }
+	  return WRITE_ERROR;
+	}
+	bufferUnflushedDataFirstOffset_ += bytesWritten;
+	if (bytesWritten == expectedBytes) {
+	  return WRITE_DONE;
+	}
+	// bytesWritten < expectedBytes
+	while (unflushedOffset + buffers_[unflushedIndex].iov_len < bufferUnflushedDataFirstOffset_) {
+	  unflushedOffset += buffers_[unflushedIndex].iov_len;
+	  ++unflushedIndex;
+	}
+  }
+  return WRITE_DONE;
 }
 
-OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFileDescriptor) {
-	while (bytesInABuffer() > 0) {
-		ssize_t ret = ::write(outputFileDescriptor, &buffer_[bufferUnflushedDataFirstIndex_],
-				bytesInABuffer());
-		if (ret <= 0) {
-			if (ret == 0 || errno == EAGAIN) {
-				return WRITE_AGAIN;
-			}
-			return WRITE_ERROR;
-		}
-		bufferUnflushedDataFirstIndex_ += ret;
-	}
-	return WRITE_DONE;
+ssize_t mapIntoBuffer(const void *mem, size_t len){
+  sassert(owned_.size() == buffers_.size());
+  buffers_.emplace_back(mem, len);
+  owned_.push_back(false);
+  size_ += len;
 }
 
 size_t OutputBuffer::bytesInABuffer() const {
-	return bufferUnflushedDataOneAfterLastIndex_ - bufferUnflushedDataFirstIndex_;
+	return size_ - bufferUnflushedDataFirstOffset_;
 }
 
-void OutputBuffer::clear() {
-	bufferUnflushedDataFirstIndex_ = 0;
-	bufferUnflushedDataOneAfterLastIndex_ = 0;
-}
-
-ssize_t OutputBuffer::copyIntoBuffer(int inputFileDescriptor, size_t len, off_t* offset) {
-	eassert(len + bufferUnflushedDataOneAfterLastIndex_ <= internalBufferCapacity_);
-	off_t bytes_written = 0;
-	while (len > 0) {
-		ssize_t ret = pread(inputFileDescriptor, (void*)&buffer_[bufferUnflushedDataOneAfterLastIndex_], len,
-				(offset ? *offset : 0));
-		if (ret <= 0) {
-			return bytes_written;
-		}
-		len -= ret;
-		bufferUnflushedDataOneAfterLastIndex_ += ret;
-		bytes_written += ret;
-	}
-	return bytes_written;
-}
-
+// TODO(peb): this function is only called from hdd_read_crc_and_block();
+// it can be simplified after hdd_read_crc_and_block() is rewritten
+// for mmap(). hdd_read_crc_and_block() only calls checkCRC() on full blocks.
 bool OutputBuffer::checkCRC(size_t bytes, uint32_t crc) const {
-	assert(bufferUnflushedDataOneAfterLastIndex_ - bytes > 0
-			&& bufferUnflushedDataOneAfterLastIndex_ - bytes < buffer_.size());
-	return mycrc32(0, &buffer_[bufferUnflushedDataOneAfterLastIndex_ - bytes], bytes) == crc;
+  // TODO(peb): rewrite
+  // TODO(peb): move to crc.cc
+	assert(size_ >= bytes);
+	if (size_ == 0) {
+	  return 0;
+	}
+	// TODO(peb): find the last 'bytes' bytes of the output buffer.
+	//return mycrc32(0, &buffer_[size__ - bytes], bytes) == crc;
 }
 
 ssize_t OutputBuffer::copyIntoBuffer(const void *mem, size_t len) {
-	eassert(bufferUnflushedDataOneAfterLastIndex_ + len <= internalBufferCapacity_);
-	memcpy((void*)&buffer_[bufferUnflushedDataOneAfterLastIndex_], mem, len);
-	bufferUnflushedDataOneAfterLastIndex_ += len;
-
-	return len;
+  sassert(owned_.size() == buffers_.size());
+  buffers_.emplace_back(malloc(len), len);
+  const struct iovec & iov = buffers_.back();
+  sassert(iov.iov_base != nullptr);
+  owned_.push_back(true);
+  memcpy((void*)iov.iov_base, mem, len);
+  size_ += len;
+  return len;
 }
 
 OutputBuffer::~OutputBuffer() {
+  sassert(owned_.size() == buffers_.size());
+  for (int i = 0; i < owned_.size(); ++i) {
+	if (owned_[i]) {
+	  free(buffers_[i].iov_base);
+	}
+  }
 }

@@ -1416,6 +1416,9 @@ uint8_t* hdd_get_header_buffer() {
 
 #endif // LIZARDFS_HAVE_THREAD_LOCAL
 
+// TODO(peb): mmap into buffer instead of copying.
+// TODO(peb): for partial block reads, we don't want to map the buffer;
+// accept nullptr for 'outputBuffer' or handle partial block reads in this function.
 int hdd_read_crc_and_block(Chunk* c, uint16_t blocknum, OutputBuffer* outputBuffer) {
 	LOG_AVG_TILL_END_OF_SCOPE0("hdd_read_block");
 	TRACETHIS2(c->chunkid, blocknum);
@@ -1443,6 +1446,7 @@ int hdd_read_crc_and_block(Chunk* c, uint16_t blocknum, OutputBuffer* outputBuff
 			assert(c->chunkFormat() == ChunkFormat::MOOSEFS);
 			const uint8_t *crc_data = gOpenChunks.getResource(mc->fd).crc_data() + blocknum * sizeof(uint32_t);
 			outputBuffer->copyIntoBuffer(crc_data, sizeof(uint32_t));
+			// TODO(peb): mmap
 			bytesRead = outputBuffer->copyIntoBuffer(c->fd, MFSBLOCKSIZE, &off);
 			if (bytesRead == toBeRead && !outputBuffer->checkCRC(bytesRead, get32bit(&crc_data))) {
 				hdd_test_chunk(ChunkWithVersionAndType{c->chunkid, c->version, c->type()});
@@ -1463,6 +1467,7 @@ int hdd_read_crc_and_block(Chunk* c, uint16_t blocknum, OutputBuffer* outputBuff
 				// It looks like this is a sparse file with an empty block. Let's check it
 				// and if that's the case let's recompute the CRC
 
+			    // TODO(peb): mmap
 				bytesRead = pread(c->fd, data, MFSBLOCKSIZE, off + sizeof(uint32_t));
 				if (bytesRead != MFSBLOCKSIZE) {
 					break;
@@ -1472,8 +1477,10 @@ int hdd_read_crc_and_block(Chunk* c, uint16_t blocknum, OutputBuffer* outputBuff
 					// backward compatibility
 					memcpy(crcBuff, &emptyblockcrc, sizeof(uint32_t));
 				}
-				bytesRead = outputBuffer->copyIntoBuffer(hdd_get_block_buffer(), kHddBlockSize);
+				// TODO(peb): mmap
+				bytesRead = outputBuffer->copyIntoBuffer(crcBuff, kHddBlockSize);
 			} else {
+			    // TODO(peb): mmap
 				bytesRead = outputBuffer->copyIntoBuffer(c->fd, kHddBlockSize, &off);
 				const uint8_t *crc = crcBuff;
 				if (bytesRead == toBeRead && !outputBuffer->checkCRC(bytesRead - 4, get32bit(&crc))) {
@@ -1573,21 +1580,21 @@ int hdd_read(uint64_t chunkid, uint32_t version, ChunkPartType chunkType,
 
 	// Ask OS for an appropriate read ahead and (if requested and needed) read some blocks
 	// that were possibly skipped in a sequential file read
-	if (c->blockExpectedToBeReadNext < block && maxBlocksToBeReadBehind > 0) {
-		// We were asked to read some possibly skipped blocks.
-		uint16_t firstBlockToRead = c->blockExpectedToBeReadNext;
-		// Try to prevent all possible overflows:
-		if (firstBlockToRead + maxBlocksToBeReadBehind < block) {
-			firstBlockToRead = block - maxBlocksToBeReadBehind;
-		}
-		sassert(firstBlockToRead < block);
-		hdd_prefetch(*c, firstBlockToRead, blocksToBeReadAhead + block - firstBlockToRead);
-		OutputBuffer buffer = OutputBuffer(
-				kHddBlockSize * (block - firstBlockToRead));
-		for (uint16_t b = firstBlockToRead; b < block; ++b) {
-			hdd_read_crc_and_block(c, b, &buffer);
-		}
-	} else {
+	// if (c->blockExpectedToBeReadNext < block && maxBlocksToBeReadBehind > 0) {
+	// 	// We were asked to read some possibly skipped blocks.
+	// 	uint16_t firstBlockToRead = c->blockExpectedToBeReadNext;
+	// 	// Try to prevent all possible overflows:
+	// 	if (firstBlockToRead + maxBlocksToBeReadBehind < block) {
+	// 		firstBlockToRead = block - maxBlocksToBeReadBehind;
+	// 	}
+	// 	sassert(firstBlockToRead < block);
+	// 	hdd_prefetch(*c, firstBlockToRead, blocksToBeReadAhead + block - firstBlockToRead);
+	// 	OutputBuffer buffer = OutputBuffer(
+	// 			kHddBlockSize * (block - firstBlockToRead));
+	// 	for (uint16_t b = firstBlockToRead; b < block; ++b) {
+	// 		hdd_read_crc_and_block(c, b, &buffer);
+	// 	}
+	// } else {
 		hdd_prefetch(*c, block, blocksToBeReadAhead);
 	}
 	c->blockExpectedToBeReadNext = std::max<uint16_t>(block + 1, c->blockExpectedToBeReadNext);
@@ -1602,12 +1609,14 @@ int hdd_read(uint64_t chunkid, uint32_t version, ChunkPartType chunkType,
 	if (size == MFSBLOCKSIZE) {
 		status = hdd_read_crc_and_block(c, block, outputBuffer);
 	} else {
-		OutputBuffer tmp(kHddBlockSize);
+		OutputBuffer tmp;
 		status = hdd_read_crc_and_block(c, block, &tmp);
 		if (status == LIZARDFS_STATUS_OK) {
 			uint8_t *crcBuffPointer = crcBuff;
 			put32bit(&crcBuffPointer, mycrc32(0, tmp.data() + serializedSize(uint32_t()) + offsetWithinBlock, size));
 			outputBuffer->copyIntoBuffer(crcBuff, sizeof(uint32_t));
+			// TODO(peb): how often is this code path executed?
+			// TODO(peb): mmap
 			outputBuffer->copyIntoBuffer(tmp.data() + serializedSize(uint32_t()) + offsetWithinBlock, size);
 		}
 	}
