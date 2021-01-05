@@ -33,4 +33,4 @@ void mycrc32_init(void);
  * In the special case when the block consists only of zeros and passed crc is equal to 0 update
  * crc to be equal to mycrc32_zeroblock(0, MFSBLOCKSIZE)
  */
-void recompute_crc_if_block_empty(uint8_t* block, uint32_t& crc);
+void recompute_crc_if_block_empty(const uint8_t* block, uint32_t& crc);

@@ -82,8 +82,6 @@ int32_t tcprecv(int sock, void *buff, uint32_t len, int flags = 0);
 int32_t tcpsend(int sock, const void *buff, uint32_t len, int flags = 0);
 int32_t tcptoread(int sock, void *buff, uint32_t leng, int msecto);
 int32_t tcptowrite(int sock, const void *buff, uint32_t leng, int msecto);
-// Returns the number of bytes written or -1 on error.
-ssize_t tcptowrite(int sock, OutputBuffer& buff, int msecto) {
 int tcptoaccept(int sock, uint32_t msecto);
 
 /* ----------------- UDP ----------------- */
