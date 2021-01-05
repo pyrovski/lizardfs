@@ -71,6 +71,11 @@ static inline uint32_t get32bit(const uint8_t **ptr) {
 	return t32;
 }
 
+static inline uint32_t get32bitp(const uint8_t * const ptr) {
+	uint32_t t32;
+	return ptr[3]+256U*(ptr[2]+256U*(ptr[1]+256U*ptr[0]));
+}
+
 static inline uint16_t get16bit(const uint8_t **ptr) {
 	uint32_t t16;
 	t16=(*ptr)[1]+256U*(*ptr)[0];
