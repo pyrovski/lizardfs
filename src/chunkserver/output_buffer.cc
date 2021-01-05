@@ -19,6 +19,7 @@
 #include "common/platform.h"
 #include <fcntl.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cassert>
 #include <cerrno>
 #include <cstddef>
@@ -33,16 +34,16 @@
 #include "devtools/request_log.h"
 
 // TODO(peb): investigate TCP cork
-OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFileDescriptor) {
+OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFileDescriptor, bool retry) {
   sassert(owned_.size() == buffers_.size());
   sassert(bufferUnflushedDataFirstOffset_ <= size_);
   if (bufferUnflushedDataFirstOffset_ == size_) {
 	return WRITE_DONE;
   }
-  // We have at least one byte to write.
-  // Find first unflushed iovec
+  // We have at least one byte to write; find the first unflushed iovec.
+  // Index in 'buffers_' of the first unflushed byte.
   size_t unflushedIndex = 0;
-  // Virtual offset of buffers_[unflushedIndex]
+  // Virtual offset of buffers_[unflushedIndex].
   size_t unflushedOffset = 0;
   while (unflushedOffset < bufferUnflushedDataFirstOffset_ && unflushedIndex < buffers_.size()) {
 	if (bufferUnflushedDataFirstOffset_ < unflushedOffset + buffers_[unflushedIndex].iov_len) {
@@ -73,7 +74,7 @@ OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFile
 		const ssize_t expectedBytes = iov.iov_len - iovOffset;
 		const ssize_t bytesWritten = ::write(outputFileDescriptor, iov.iov_base + iovOffset, iov.iov_len - iovOffset);
 		if (bytesWritten <= 0) {
-		  if (bytesWritten == 0 || errno == EAGAIN) {
+		  if (bytesWritten == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
 			return WRITE_AGAIN;
 		  }
 		  return WRITE_ERROR;
@@ -83,6 +84,11 @@ OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFile
 		  ++unflushedIndex;
 		  unflushedOffset += iovec.iov_len;
 		} // if bytesWritten < expectedBytes, we'll pick up from bufferUnflushedDataFirstOffset_.
+		// bytesWritten < expectedBytes
+		if (retry) {
+		  continue;
+		}
+		return WRITE_AGAIN;
 	  } else {
 		iov.iov_base += iovOffset;
 		iov.iov_len -= iovOffset;
@@ -93,7 +99,7 @@ OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFile
 										&buffers_[unflushedIndex],
 										buffers_.size() - unflushedIndex);
 	if (bytesWritten <= 0) {
-	  if (bytesWritten == 0 || errno == EAGAIN) {
+	  if (bytesWritten == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
 		return WRITE_AGAIN;
 	  }
 	  return WRITE_ERROR;
@@ -107,6 +113,9 @@ OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFile
 	  unflushedOffset += buffers_[unflushedIndex].iov_len;
 	  ++unflushedIndex;
 	}
+	if (!retry) {
+	  return WRITE_AGAIN;
+	}
   }
   return WRITE_DONE;
 }
@@ -116,6 +125,11 @@ ssize_t mapIntoBuffer(const void *mem, size_t len){
   buffers_.emplace_back(mem, len);
   owned_.push_back(false);
   size_ += len;
+  return len;
+}
+
+ssize_t mapIntoBuffer(const std::vector<uint8_t> &data) {
+  return mapIntoBuffer(data.data(), sizeof(data.value_type) * data.size());
 }
 
 size_t OutputBuffer::bytesInABuffer() const {
@@ -153,6 +167,39 @@ ssize_t OutputBuffer::copyIntoBuffer(const void *mem, size_t len) {
   memcpy((void*)iov.iov_base, mem, len);
   size_ += len;
   return len;
+}
+
+uint32_t CRC(size_t offset, size_t size) {
+  sassert(bytes > 0);
+  sassert(offset + size <= size_);
+  size_t index = 0;
+  // Virtual offset of buffers_[index].
+  size_t virtualOffset = 0;
+  while (virtualOffset + buffers_[index].iov_len < offset) {
+	virtualOffset += buffers_[index].iov_len;
+	++index;
+  }
+  size_t processed = offset;
+  uint32_t crc = 0;
+  while (processed < offset + size) {
+	const struct iovec &iov = buffers_[index];
+	const size_t bufferOffset = std::max(offset - virtualOffset, 0);
+	// If we need to examine to the end of the indexed buffer
+	if (offset + size >= virtualOffset + iov.iov_len) {
+	  const size_t toProcess = iov.iov_len - bufferOffset;
+	  const uint32_t bufferCRC = mycrc32(iov.iov_base + bufferOffset, toProcess);
+	  crc = mycrc32_combine(crc, bufferCRC, toProcess);
+	  processed += toProcess;
+	} else { // offset + size < virtualOffset + iov.iov_len
+	  const size_t toProcess = offset + size - processed;
+	  const uint32_t bufferCRC = mycrc32(iov.iov_base + bufferOffset, toProcess);
+	  crc = mycrc32_combine(crc, bufferCRC, toProcess);
+	  processed += toProcess;
+	}
+	offset += iov.iov_len;
+	++index;
+  }
+  return crc;
 }
 
 OutputBuffer::~OutputBuffer() {
