@@ -136,7 +136,7 @@ packetstruct* worker_create_detached_packet_with_output_buffer(
 	uint32_t sizeOfWholePacket = PacketHeader::kSize + header.length;
 	packetstruct* outPacket = new packetstruct();
 	passert(outPacket);
-	outPacket->outputBuffer.reset(new OutputBuffer(sizeOfWholePacket));
+	outPacket->outputBuffer.reset(new OutputBuffer());
 	if (outPacket->outputBuffer->copyIntoBuffer(packetPrefix) != (ssize_t)packetPrefix.size()) {
 		delete outPacket;
 		return nullptr;

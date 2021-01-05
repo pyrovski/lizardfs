@@ -915,10 +915,12 @@ void hdd_check_folders() {
 			case SCST_SCANFINISHED:
 				f->scanthread.join();
 				// no break - it's ok !!!
+				__attribute__ ((fallthrough));
 			case SCST_SENDNEEDED:
 			case SCST_SCANNEEDED:
 				f->scanstate = SCST_WORKING;
 				// no break - it's ok !!!
+				__attribute__ ((fallthrough));
 			case SCST_WORKING:
 				hdd_senddata(f,1);
 				changed = 1;
@@ -1184,6 +1186,7 @@ static inline int chunk_writecrc(MooseFSChunk *c) {
 	c->owner->needrefresh = 1;
 	folderlock.unlock();
 	uint8_t *crc_data = gOpenChunks.getResource(c->fd).crc_data();
+	// TODO(peb): mmap
 	ssize_t ret = pwrite(c->fd, crc_data, c->getCrcBlockSize(), c->getCrcOffset());
 	if (ret != static_cast<ssize_t>(c->getCrcBlockSize())) {
 		int errmem = errno;
@@ -1416,95 +1419,83 @@ uint8_t* hdd_get_header_buffer() {
 
 #endif // LIZARDFS_HAVE_THREAD_LOCAL
 
-// TODO(peb): mmap into buffer instead of copying.
-// TODO(peb): for partial block reads, we don't want to map the buffer;
-// accept nullptr for 'outputBuffer' or handle partial block reads in this function.
-int hdd_read_crc_and_block(Chunk* c, uint16_t blocknum, OutputBuffer* outputBuffer) {
-	LOG_AVG_TILL_END_OF_SCOPE0("hdd_read_block");
-	TRACETHIS2(c->chunkid, blocknum);
-	int bytesRead = 0;
-	uint64_t ts, te;
+// Reads 'size' bytes at offset 'offset' from block # 'blocknum' of chunk 'c'
+// and copies/maps data into 'outputBuffer'.
+// 'offset' is block-specific.
+// May partially populate 'outputBuffer' on error.
+// Returns a LizardFS status code.
+lizardfs_error_code hdd_read_crc_and_block(Chunk* c, uint16_t blocknum, size_t offset, size_t size, OutputBuffer& outputBuffer) {
+  LOG_AVG_TILL_END_OF_SCOPE0("hdd_read_block");
+  TRACETHIS2(c->chunkid, blocknum);
+  int bytesRead = 0;
 
-	if (blocknum >= MFSBLOCKSINCHUNK) {
-		return LIZARDFS_ERROR_BNUMTOOBIG;
+  if (blocknum >= MFSBLOCKSINCHUNK) {
+	return LIZARDFS_ERROR_BNUMTOOBIG;
+  }
+
+  if (blocknum >= c->blocks) {
+	// Putting zeros into the buffer seems like incorrect behavior.
+	// Maybe this is used for EC?/ Regardless, the EC reconstruction algorithm
+	// should pad inputs if necessary, rather than forcing the chunkservers to
+	// do it.
+	return LIZARDFS_ERROR_BNUMTOOBIG;
+  }
+
+  const int32_t toBeRead = size + (c->chunkFormat() ==   ChunkFormat::INTERLEAVED
+								   ? sizeof(uint32_t) : 0);
+  const auto ts = get_usectime();
+  // Chunk-level offset
+  const off_t off = c->getBlockOffset(blocknum);
+  const uint8_t * const map = static_cast<uint8_t*>(gOpenChunks.getResource(c->fd).map());
+  const uint8_t * blockData = nullptr;
+  
+  IF_MOOSEFS_CHUNK(mc, c) {
+	assert(c->chunkFormat() == ChunkFormat::MOOSEFS);
+	const uint8_t * const crc_data = gOpenChunks.getResource(mc->fd).crc_data() + blocknum * sizeof(uint32_t);
+	blockData = map + off;
+	const uint32_t crc = mycrc32(0, blockData, MFSBLOCKSIZE);
+	// TODO(peb): handle mmap read errors
+	if (get32bitp(crc_data) != crc) {
+	  hdd_test_chunk(ChunkWithVersionAndType{c->chunkid, c->version, c->type()});
+	  return LIZARDFS_ERROR_CRC;
 	}
+	bytesRead = outputBuffer.copyIntoBuffer(crc_data, sizeof(uint32_t));
+  } else do { // Interleaved chunk
+	  assert(c->chunkFormat() == ChunkFormat::INTERLEAVED);
+	  auto containsZerosOnly = [](uint8_t const * const buffer, uint32_t size) {
+		return buffer[0] == 0 && !memcmp(buffer, buffer + 1, size - 1);
+	  };
+	  const uint8_t * const crcData = map + off;
+	  blockData = map + off + sizeof(uint32_t);
+	  if (containsZerosOnly(crcData, sizeof(uint32_t)) && 
+		  // It looks like this is a sparse file with an empty block. Let's check it
+		  // and if that's the case let's recompute the CRC
+		  containsZerosOnly(blockData, MFSBLOCKSIZE)) {
+		// It's indeed a sparse block, recompute the CRC in order to provide
+		// backward compatibility
+		bytesRead = outputBuffer.mapIntoBuffer(&emptyblockcrc, sizeof(emptyblockcrc));
+	  } else {
+		const uint32_t crc = get32bitp(crcData);
+		if (crc != mycrc32(0, blockData, MFSBLOCKSIZE))
+		  hdd_test_chunk(ChunkWithVersionAndType{c->chunkid, c->version, c->type()});
+		return LIZARDFS_ERROR_CRC;
+		bytesRead = outputBuffer.mapIntoBuffer(crcData, sizeof(uint32_t));
+	  }
+	  // TODO(peb): handle mmap errors encountered above
+	  bytesRead += outputBuffer.mapIntoBuffer(blockData + offset, size);
+	} while (false);
 
-	if (blocknum >= c->blocks) {
-		bytesRead = outputBuffer->copyIntoBuffer(&emptyblockcrc, sizeof(uint32_t));
-		static const std::vector<uint8_t> zeros_block(MFSBLOCKSIZE, 0);
-		bytesRead += outputBuffer->copyIntoBuffer(zeros_block);
-		if (static_cast<uint32_t>(bytesRead) != kHddBlockSize) {
-			return LIZARDFS_ERROR_IO;
-		}
-	} else {
-		int32_t toBeRead = c->chunkFormat() == ChunkFormat::INTERLEAVED
-				? kHddBlockSize : MFSBLOCKSIZE;
-		ts = get_usectime();
-		off_t off = c->getBlockOffset(blocknum);
+  const auto te = get_usectime();
+  hdd_stats_dataread(c->owner, toBeRead, te-ts);
 
-		IF_MOOSEFS_CHUNK(mc, c) {
-			assert(c->chunkFormat() == ChunkFormat::MOOSEFS);
-			const uint8_t *crc_data = gOpenChunks.getResource(mc->fd).crc_data() + blocknum * sizeof(uint32_t);
-			outputBuffer->copyIntoBuffer(crc_data, sizeof(uint32_t));
-			// TODO(peb): mmap
-			bytesRead = outputBuffer->copyIntoBuffer(c->fd, MFSBLOCKSIZE, &off);
-			// TODO(peb): call mycrc32() directly on the mmap()ed file
-			if (bytesRead == toBeRead && !outputBuffer->checkCRC(bytesRead, get32bit(&crc_data))) {
-				hdd_test_chunk(ChunkWithVersionAndType{c->chunkid, c->version, c->type()});
-				return LIZARDFS_ERROR_CRC;
-			}
-		} else do {
-			assert(c->chunkFormat() == ChunkFormat::INTERLEAVED);
-			uint8_t* crcBuff = hdd_get_block_buffer();
-			uint8_t* data = crcBuff + sizeof(uint32_t);
-			auto containsZerosOnly = [](uint8_t* buffer, uint32_t size) {
-				return buffer[0] == 0 && !memcmp(buffer, buffer + 1, size - 1);
-			};
-			bytesRead = pread(c->fd, crcBuff, 4, off);
-			if (bytesRead != 4) {
-				break;
-			}
-			if (containsZerosOnly(crcBuff, 4)) {
-				// It looks like this is a sparse file with an empty block. Let's check it
-				// and if that's the case let's recompute the CRC
-
-			    // TODO(peb): mmap
-				bytesRead = pread(c->fd, data, MFSBLOCKSIZE, off + sizeof(uint32_t));
-				if (bytesRead != MFSBLOCKSIZE) {
-					break;
-				}
-				if (containsZerosOnly(data, MFSBLOCKSIZE)) {
-					// It's indeed a sparse block, recompute the CRC in order to provide
-					// backward compatibility
-					memcpy(crcBuff, &emptyblockcrc, sizeof(uint32_t));
-				}
-				// TODO(peb): mmap
-				bytesRead = outputBuffer->copyIntoBuffer(crcBuff, kHddBlockSize);
-			} else {
-			    // TODO(peb): mmap
-				bytesRead = outputBuffer->copyIntoBuffer(c->fd, kHddBlockSize, &off);
-				const uint8_t *crc = crcBuff;
-				// TODO(peb): call mycrc32() directly on the mmap()ed file
-				if (bytesRead == toBeRead && !outputBuffer->checkCRC(bytesRead - 4, get32bit(&crc))) {
-					hdd_test_chunk(ChunkWithVersionAndType{c->chunkid, c->version, c->type()});
-					return LIZARDFS_ERROR_CRC;
-				}
-			}
-		} while (false);
-
-		te = get_usectime();
-		hdd_stats_dataread(c->owner, toBeRead, te-ts);
-
-		if (bytesRead != toBeRead) {
-			hdd_error_occured(c);   // uses and preserves errno !!!
-			lzfs_silent_errlog(LOG_WARNING,
-					"read_block_from_chunk: file:%s - read error", c->filename().c_str());
-			hdd_report_damaged_chunk(c->chunkid, c->type());
-			return LIZARDFS_ERROR_IO;
-		}
-	}
-
-	return LIZARDFS_STATUS_OK;
+  if (bytesRead != toBeRead) {
+	hdd_error_occured(c);   // uses and preserves errno !!!
+	lzfs_silent_errlog(LOG_WARNING,
+					   "read_block_from_chunk: file:%s - read error", c->filename().c_str());
+	hdd_report_damaged_chunk(c->chunkid, c->type());
+	return LIZARDFS_ERROR_IO;
+  }
+  return LIZARDFS_STATUS_OK;
 }
 
 static void hdd_prefetch(Chunk &chunk, uint16_t first_block, uint32_t block_count) {
@@ -1559,9 +1550,9 @@ int hdd_prefetch_blocks(uint64_t chunkid, ChunkPartType chunk_type, uint32_t fir
 	return status;
 }
 
-int hdd_read(uint64_t chunkid, uint32_t version, ChunkPartType chunkType,
+lizardfs_error_code hdd_read(uint64_t chunkid, uint32_t version, ChunkPartType chunkType,
 		uint32_t offset, uint32_t size, uint32_t maxBlocksToBeReadBehind,
-		uint32_t blocksToBeReadAhead, OutputBuffer* outputBuffer) {
+		uint32_t blocksToBeReadAhead, OutputBuffer &outputBuffer) {
 	LOG_AVG_TILL_END_OF_SCOPE0("hdd_read");
 	TRACETHIS3(chunkid, offset, size);
 
@@ -1598,80 +1589,50 @@ int hdd_read(uint64_t chunkid, uint32_t version, ChunkPartType chunkType,
 	// 	}
 	// } else {
 		hdd_prefetch(*c, block, blocksToBeReadAhead);
-	}
+	// }
 	c->blockExpectedToBeReadNext = std::max<uint16_t>(block + 1, c->blockExpectedToBeReadNext);
 
-
 	// Put checksum of the requested data followed by data itself into buffer.
-	// If possible (in case when whole block is read) try to put data directly
-	// into passed outputBuffer, otherwise use temporary buffer to recompute
-	// the checksum
-	uint8_t crcBuff[sizeof(uint32_t)];
-	int status = LIZARDFS_STATUS_OK;
-	if (size == MFSBLOCKSIZE) {
-		status = hdd_read_crc_and_block(c, block, outputBuffer);
-	} else {
-		OutputBuffer tmp;
-		status = hdd_read_crc_and_block(c, block, &tmp);
-		if (status == LIZARDFS_STATUS_OK) {
-			uint8_t *crcBuffPointer = crcBuff;
-			put32bit(&crcBuffPointer, mycrc32(0, tmp.data() + serializedSize(uint32_t()) + offsetWithinBlock, size));
-			outputBuffer->copyIntoBuffer(crcBuff, sizeof(uint32_t));
-			// TODO(peb): how often is this code path executed?
-			// TODO(peb): mmap
-			outputBuffer->copyIntoBuffer(tmp.data() + serializedSize(uint32_t()) + offsetWithinBlock, size);
-		}
-	}
-
+    const lizardfs_error_code status = hdd_read_crc_and_block(c, block, offsetWithinBlock, size, outputBuffer);
 	PRINTTHIS(status);
 	hdd_chunk_release(c);
 	return status;
 }
 
 /**
- * A way of handling sparse files. If block is filled with zeros and crcBuffer is filled with
- * zeros as well, rewrite the crcBuffer so that it stores proper CRC.
+ * Reads the specified block and verifies its CRC. Sets 'bytesRead' to the
+ * number of bytes read and 'data' to the memory-mapped block.
+ * Returns a LizardFS error code.
  */
-void hdd_int_recompute_crc_if_block_empty(uint8_t* block, uint8_t* crcBuffer) {
-	const uint8_t* tmpPtr = crcBuffer;
-	uint32_t crc = get32bit(&tmpPtr);
-
-	recompute_crc_if_block_empty(block, crc);
-	uint8_t* tmpPtr2 = crcBuffer;
-	put32bit(&tmpPtr2, crc);
-}
-
-/**
- * Returns number of read bytes on success, -1 on failure.
- * Assumes blockBuffer can fit both data and CRC.
- */
-int hdd_int_read_block_and_crc(Chunk* c, uint8_t* blockBuffer, uint16_t blocknum, const char* errorMsg) {
-	IF_MOOSEFS_CHUNK(mc, c) {
-		sassert(c->chunkFormat() == ChunkFormat::MOOSEFS);
-		uint8_t *crc_data = gOpenChunks.getResource(mc->fd).crc_data();
-		memcpy(blockBuffer, crc_data + blocknum * sizeof(uint32_t), sizeof(uint32_t));
-		if (pread(mc->fd, blockBuffer + sizeof(uint32_t), MFSBLOCKSIZE, mc->getBlockOffset(blocknum))
-				!= MFSBLOCKSIZE) {
-			hdd_error_occured(mc);   // uses and preserves errno !!!
-			lzfs_silent_errlog(LOG_WARNING,
-					"%s: file:%s - read error", errorMsg, mc->filename().c_str());
-			hdd_report_damaged_chunk(mc->chunkid, mc->type());
-			return -1;
-		}
-		return MFSBLOCKSIZE;
-	} else {
-		sassert(c->chunkFormat() == ChunkFormat::INTERLEAVED);
-		if (pread(c->fd, blockBuffer, kHddBlockSize, c->getBlockOffset(blocknum))
-				!= kHddBlockSize) {
-			hdd_error_occured(c);   // uses and preserves errno !!!
-			lzfs_silent_errlog(LOG_WARNING,
-					"%s: file:%s - read error", errorMsg, c->filename().c_str());
-			hdd_report_damaged_chunk(c->chunkid, c->type());
-			return -1;
-		}
-		hdd_int_recompute_crc_if_block_empty(blockBuffer + sizeof(uint32_t), blockBuffer);
-		return kHddBlockSize;
-	}
+int hdd_int_read_block_and_crc(Chunk* c, uint16_t blocknum, size_t &bytesRead,
+							   const uint8_t *& data, uint32_t &storedCRC) {
+  const uint8_t * const map = static_cast<uint8_t*>(gOpenChunks.getResource(c->fd).map());
+  bytesRead = 0;
+  IF_MOOSEFS_CHUNK(mc, c) {
+	sassert(c->chunkFormat() == ChunkFormat::MOOSEFS);
+	const uint8_t * const crc_data = gOpenChunks.getResource(mc->fd).crc_data();
+	storedCRC = get32bitp(crc_data + blocknum * sizeof(uint32_t));
+	data = map + mc->getBlockOffset(blocknum);
+  } else {
+	sassert(c->chunkFormat() == ChunkFormat::INTERLEAVED);
+	data = map + c->getBlockOffset(blocknum);
+	storedCRC = get32bit(&data);
+	// TODO(peb): handle mmap errors
+	recompute_crc_if_block_empty(data + sizeof(uint32_t), storedCRC);
+	// data was incremented by 4 bytes in get32bit()
+	bytesRead = sizeof(uint32_t);
+  }
+  const uint32_t computedCRC = mycrc32(0, data, MFSBLOCKSIZE);
+  // TODO(peb): handle mmap errors; distinguish between read errors and CRC errors
+  // if () {
+  // 	return LIZARDFS_ERROR_IO;
+  // }
+  bytesRead += MFSBLOCKSIZE;
+  hdd_stats_read(bytesRead);
+  if (storedCRC != computedCRC) {
+	return LIZARDFS_ERROR_CRC;
+  }
+  return LIZARDFS_STATUS_OK;
 }
 
 void hdd_int_punch_holes(Chunk *c, const uint8_t *buffer, uint32_t offset, uint32_t size) {
@@ -1731,6 +1692,7 @@ int hdd_int_write_partial_block_and_crc(
 	const int crcSize = serializedSize(uint32_t());
 	IF_MOOSEFS_CHUNK(mc, c) {
 		sassert(c->chunkFormat() == ChunkFormat::MOOSEFS);
+		// TODO(peb): mmap
 		auto ret = pwrite(mc->fd, buffer, size, mc->getBlockOffset(blockNum) + offset);
 		if (ret != size) {
 			hdd_error_occured(mc);   // uses and preserves errno !!!
@@ -1745,6 +1707,7 @@ int hdd_int_write_partial_block_and_crc(
 		return size;
 	} else {
 		sassert(c->chunkFormat() == ChunkFormat::INTERLEAVED);
+		// TODO(peb): mmap
 		auto ret = pwrite(c->fd, crcBuff, crcSize, c->getBlockOffset(blockNum));
 		if (ret != crcSize) {
 			hdd_error_occured(c);   // uses and preserves errno !!!
@@ -1753,6 +1716,7 @@ int hdd_int_write_partial_block_and_crc(
 			hdd_report_damaged_chunk(c->chunkid, c->type());
 			return -1;
 		}
+		// TODO(peb): mmap
 		ret = pwrite(c->fd, buffer, size, c->getBlockOffset(blockNum) + offset + crcSize);
 		if (ret != size) {
 			hdd_error_occured(c);   // uses and preserves errno !!!
@@ -1781,7 +1745,7 @@ int hdd_write(Chunk* chunk, uint32_t version,
 	assert(chunk);
 	LOG_AVG_TILL_END_OF_SCOPE0("hdd_write");
 	TRACETHIS3(chunk->chunkid, offset, size);
-	uint32_t precrc, postcrc, combinedcrc, chcrc;
+	uint32_t precrc, postcrc, combinedcrc;
 	uint64_t ts, te;
 
 	if (chunk->version != version && version > 0) {
@@ -1823,41 +1787,37 @@ int hdd_write(Chunk* chunk, uint32_t version,
 		}
 		te = get_usectime();
 		hdd_stats_datawrite(chunk->owner, written, te - ts);
-	} else {
+	} else { // 'offset' is nonzero or size != MFSBLOCKSIZE
 		uint8_t *blockbuffer = hdd_get_block_buffer();
 		if (blocknum < chunk->blocks) {
 			ts = get_usectime();
-			auto readBytes = hdd_int_read_block_and_crc(chunk, blockbuffer, blocknum,
-			                                            "write_block_to_chunk");
-			uint8_t *data_in_buffer = blockbuffer + sizeof(uint32_t); // Skip crc
-			if (readBytes < 0) {
-				return LIZARDFS_ERROR_IO;
+			// "write_block_to_chunk"
+			size_t readBytes;
+			const uint8_t *data = nullptr;
+			uint32_t storedCRC;
+			const auto status = hdd_int_read_block_and_crc(chunk, blocknum, readBytes, data, storedCRC);
+			// TODO(peb): move this error handling back into hdd_int_read_block_and_crc(), along with the error message.
+			if (status != LIZARDFS_STATUS_OK) {
+			  errno = 0;
+			  hdd_error_occured(chunk);  // uses and preserves errno !!!
+			  hdd_report_damaged_chunk(chunk->chunkid, chunk->type());
+			  if (status == LIZARDFS_ERROR_CRC) {
+				lzfs_pretty_syslog(LOG_WARNING, "write_block_to_chunk: file:%s - CRC error",
+								   chunk->filename().c_str());
+			  } else if (status == LIZARDFS_ERROR_IO) {
+				lzfs_pretty_syslog(LOG_WARNING, "write_block_to_chunk: file:%s - IO error",
+								   chunk->filename().c_str());
+			  }
+			  return status;
 			}
 			te = get_usectime();
 			hdd_stats_dataread(chunk->owner, readBytes, te - ts);
-			precrc = mycrc32(0, data_in_buffer, offset);
-			chcrc = mycrc32(0, data_in_buffer + offset, size);
-			postcrc = mycrc32(0, data_in_buffer + offset + size, MFSBLOCKSIZE - (offset + size));
-			if (offset == 0) {
-				combinedcrc = mycrc32_combine(chcrc, postcrc, MFSBLOCKSIZE - (offset + size));
-			} else {
-				combinedcrc = mycrc32_combine(precrc, chcrc, size);
-				if ((offset + size) < MFSBLOCKSIZE) {
-					combinedcrc =
-					    mycrc32_combine(combinedcrc, postcrc, MFSBLOCKSIZE - (offset + size));
-				}
-			}
-			const uint8_t *crcBuffPointer = blockbuffer;
-			const uint8_t **tmpPtr = &crcBuffPointer;
-			if (get32bit(tmpPtr) != combinedcrc) {
-				errno = 0;
-				hdd_error_occured(chunk);  // uses and preserves errno !!!
-				lzfs_pretty_syslog(LOG_WARNING, "write_block_to_chunk: file:%s - crc error",
-				       chunk->filename().c_str());
-				hdd_report_damaged_chunk(chunk->chunkid, chunk->type());
-				return LIZARDFS_ERROR_CRC;
-			}
-		} else {
+			// TODO(peb): this block recomputes CRCs; it is possible to compute
+			// once and combine them. hdd_int_read_block_and_crc() already computed the block CRC.
+			precrc = mycrc32(0, data, offset);
+			postcrc = mycrc32(0, data + offset + size, MFSBLOCKSIZE - (offset + size));
+		} else { // New block
+		  // TODO(peb): mremap() not necessary here if we mmap the max chunk size initially.
 			if (ftruncate(chunk->fd, chunk->getFileSizeFromBlockCount(blocknum + 1)) < 0) {
 				hdd_error_occured(chunk);  // uses and preserves errno !!!
 				lzfs_silent_errlog(LOG_WARNING, "write_block_to_chunk: file:%s - ftruncate error",
@@ -1885,6 +1845,7 @@ int hdd_write(Chunk* chunk, uint32_t version,
 				combinedcrc = mycrc32_combine(combinedcrc, postcrc, MFSBLOCKSIZE - (offset + size));
 			}
 		}
+		// TODO(peb): remove use of blockbuffer
 		uint8_t *crcBuffPointer = blockbuffer;
 		put32bit(&crcBuffPointer, combinedcrc);
 		int written = hdd_int_write_partial_block_and_crc(chunk, buffer, offset, size, blockbuffer,
@@ -1950,6 +1911,7 @@ static int hdd_chunk_overwrite_version(Chunk* c, uint32_t newVersion) {
 		(void)mc;
 		std::vector<uint8_t> buffer;
 		serialize(buffer, newVersion);
+		// TODO(peb): mmap
 		if (pwrite(c->fd, buffer.data(), buffer.size(), ChunkSignature::kVersionOffset)
 				!= static_cast<ssize_t>(buffer.size())) {
 			return LIZARDFS_ERROR_IO;
@@ -1991,6 +1953,7 @@ std::pair<int, Chunk *> hdd_int_create_chunk(uint64_t chunkid, uint32_t version,
 		memset(hdd_get_header_buffer(), 0, mc->getHeaderSize());
 		uint8_t *ptr = hdd_get_header_buffer();
 		serialize(&ptr, ChunkSignature(chunkid, version, chunkType));
+		// TODO(peb): mmap
 		if (write(chunk->fd, hdd_get_header_buffer(), mc->getHeaderSize()) !=
 		    static_cast<ssize_t>(mc->getHeaderSize())) {
 			hdd_error_occured(chunk);  // uses and preserves errno !!!
@@ -2031,11 +1994,9 @@ static int hdd_int_test(uint64_t chunkid, uint32_t version, ChunkPartType chunkT
 	uint16_t block;
 		int status;
 	Chunk *c;
-	uint8_t *blockbuffer;
 
 	stats_test++;
 
-	blockbuffer = hdd_get_block_buffer();
 	c = hdd_chunk_find(chunkid, chunkType);
 	if (c==NULL) {
 		return LIZARDFS_ERROR_NOCHUNK;
@@ -2053,32 +2014,36 @@ static int hdd_int_test(uint64_t chunkid, uint32_t version, ChunkPartType chunkT
 	}
 	status = LIZARDFS_STATUS_OK; // will be overwritten in the loop below if the test fails
 	for (block=0 ; block<c->blocks ; block++) {
-		auto readBytes = hdd_int_read_block_and_crc(c, blockbuffer, block, "test_chunk");
-		uint8_t *data_in_buffer = blockbuffer + sizeof(uint32_t); // Skip crc
-		if (readBytes < 0) {
-			status = LIZARDFS_ERROR_IO;
-			break;
-		}
-		hdd_stats_read(readBytes);
-		const uint8_t* crcBuffPointer = blockbuffer;
-		if (get32bit(&crcBuffPointer) != mycrc32(0, data_in_buffer, MFSBLOCKSIZE)) {
-			errno = 0;      // set anything to errno
-			hdd_error_occured(c);   // uses and preserves errno !!!
-			lzfs_pretty_syslog(LOG_WARNING, "test_chunk: file:%s - crc error", c->filename().c_str());
-			status = LIZARDFS_ERROR_CRC;
-			break;
-		}
+	  size_t bytesRead;
+	  const uint8_t *data;
+	  uint32_t storedCRC;
+	  status = hdd_int_read_block_and_crc(c, block, bytesRead, data, storedCRC);
+	  if (status != LIZARDFS_STATUS_OK) {
+		break;
+	  }
 	}
 #ifdef LIZARDFS_HAVE_POSIX_FADVISE
 	// Always advise the OS that tested chunks should not be cached. Don't rely on
 	// hdd_delayed_ops to do it for us, because it may be disabled using a config file.
+	// TODO(peb): convert to madvise()
 	posix_fadvise(c->fd,0,0,POSIX_FADV_DONTNEED);
 #endif /* LIZARDFS_HAVE_POSIX_FADVISE */
 	if (status != LIZARDFS_STATUS_OK) {
-		// test failed -- chunk is damaged
-		hdd_io_end(c);
-		hdd_chunk_release(c);
-		return status;
+	  errno = 0;
+	  hdd_error_occured(c);   // uses and preserves errno !!!
+	  if (status == LIZARDFS_ERROR_CRC) {
+		lzfs_pretty_syslog(LOG_WARNING, "test_chunk: file:%s - crc error", c->filename().c_str());
+		// TODO(peb): why not report a damaged chunk here? The original code did not.
+	  } else if (status == LIZARDFS_ERROR_IO){
+		lzfs_silent_errlog(LOG_WARNING,
+						   "test_chunk: file:%s - read error", c->filename().c_str());
+	  }
+	  // test failed -- chunk is damaged
+	  hdd_report_damaged_chunk(c->chunkid, c->type());
+
+	  hdd_io_end(c);
+	  hdd_chunk_release(c);
+	  return status;
 	}
 	status = hdd_io_end(c);
 	if (status!=LIZARDFS_STATUS_OK) {
@@ -2087,7 +2052,7 @@ static int hdd_int_test(uint64_t chunkid, uint32_t version, ChunkPartType chunkT
 		return status;
 	}
 	hdd_chunk_release(c);
-	return LIZARDFS_STATUS_OK;
+	return status;
 }
 
 static int hdd_int_duplicate(uint64_t chunkId, uint32_t chunkVersion, uint32_t chunkNewVersion,
@@ -2200,6 +2165,7 @@ static int hdd_int_duplicate(uint64_t chunkId, uint32_t chunkVersion, uint32_t c
 		hdd_stats_write(mc->getHeaderSize());
 	}
 	lseek(oc->fd, c->getBlockOffset(0), SEEK_SET);
+	// TODO(peb): mmap. This loop mostly turns into memcpy().
 	for (block=0 ; block<oc->blocks ; block++) {
 		retsize = read(oc->fd,blockbuffer,blockSize);
 		if (retsize!=blockSize) {
@@ -2364,6 +2330,7 @@ static int hdd_int_truncate(uint64_t chunkId, ChunkPartType chunkType, uint32_t 
 				memcpy(crc_data + block * sizeof(uint32_t), &emptyblockcrc, sizeof(uint32_t));
 			}
 		}
+		// TODO(peb): mremap()
 		if (ftruncate(c->fd, c->getFileSizeFromBlockCount(blocks)) < 0) {
 			hdd_error_occured(c);   // uses and preserves errno !!!
 			lzfs_silent_errlog(LOG_WARNING,
@@ -2389,6 +2356,7 @@ static int hdd_int_truncate(uint64_t chunkId, ChunkPartType chunkType, uint32_t 
 				return LIZARDFS_ERROR_IO;
 			}
 		}
+		// TODO(peb): mremap
 		if (ftruncate(c->fd, c->getFileSizeFromBlockCount(blocks)) < 0) {
 			hdd_error_occured(c);   // uses and preserves errno !!!
 			lzfs_silent_errlog(LOG_WARNING,
@@ -2425,6 +2393,7 @@ static int hdd_int_truncate(uint64_t chunkId, ChunkPartType chunkType, uint32_t 
 				}
 			} else {
 				sassert(c->chunkFormat() == ChunkFormat::INTERLEAVED);
+				// TODO(peb): mmap
 				if (pwrite(c->fd, crcBuff, 4, c->getBlockOffset(fullBlocks)) != 4) {
 					hdd_error_occured(c);   // uses and preserves errno !!!
 					lzfs_silent_errlog(LOG_WARNING,
@@ -2554,6 +2523,7 @@ static int hdd_int_duptrunc(uint64_t chunkId, uint32_t chunkVersion, uint32_t ch
 	}
 	lseek(c->fd, c->getBlockOffset(0), SEEK_SET);
 	lseek(oc->fd, c->getBlockOffset(0), SEEK_SET);
+	// TODO(peb): mmap
 	if (blocks>oc->blocks) { // expanding
 		for (block=0 ; block<oc->blocks ; block++) {
 			retsize = read(oc->fd,blockbuffer,blockSize);
@@ -2570,6 +2540,7 @@ static int hdd_int_duptrunc(uint64_t chunkId, uint32_t chunkVersion, uint32_t ch
 				return LIZARDFS_ERROR_IO;
 			}
 			hdd_stats_read(blockSize);
+			// TODO(peb): mmap
 			retsize = write(c->fd,blockbuffer,blockSize);
 			if (retsize!=blockSize) {
 				hdd_error_occured(c);   // uses and preserves errno !!!
@@ -2589,6 +2560,7 @@ static int hdd_int_duptrunc(uint64_t chunkId, uint32_t chunkVersion, uint32_t ch
 				memcpy(hdrbuffer + mc->getCrcOffset() + sizeof(uint32_t) * block, &emptyblockcrc, sizeof(uint32_t));
 			}
 		}
+		// TODO(peb): mmap
 		if (ftruncate(c->fd, c->getFileSizeFromBlockCount(blocks))<0) {
 			hdd_error_occured(c);   // uses and preserves errno !!!
 			lzfs_silent_errlog(LOG_WARNING,
@@ -2618,6 +2590,7 @@ static int hdd_int_duptrunc(uint64_t chunkId, uint32_t chunkVersion, uint32_t ch
 					return LIZARDFS_ERROR_IO;
 				}
 				hdd_stats_read(blockSize);
+				// TODO(peb): mmap
 				retsize = write(c->fd,blockbuffer,blockSize);
 				if (retsize!=blockSize) {
 					hdd_error_occured(c);   // uses and preserves errno !!!
@@ -2648,6 +2621,7 @@ static int hdd_int_duptrunc(uint64_t chunkId, uint32_t chunkVersion, uint32_t ch
 					return LIZARDFS_ERROR_IO;
 				}
 				hdd_stats_read(blockSize);
+				// TODO(peb): mmap
 				retsize = write(c->fd,blockbuffer,blockSize);
 				if (retsize!=blockSize) {
 					hdd_error_occured(c);   // uses and preserves errno !!!
@@ -2688,6 +2662,7 @@ static int hdd_int_duptrunc(uint64_t chunkId, uint32_t chunkVersion, uint32_t ch
 				put32bit(&ptr,crc);
 			}
 			memset(blockbuffer + toBeRead, 0, MFSBLOCKSIZE - lastBlockSize);
+			// TODO(peb): mmap
 			retsize = write(c->fd, blockbuffer, blockSize);
 			if (retsize!=blockSize) {
 				hdd_error_occured(c);   // uses and preserves errno !!!
@@ -2707,6 +2682,7 @@ static int hdd_int_duptrunc(uint64_t chunkId, uint32_t chunkVersion, uint32_t ch
 		uint8_t *crc_data = gOpenChunks.getResource(mc->fd).crc_data();
 		memcpy(crc_data, hdrbuffer + mc->getCrcOffset(), mc->getCrcBlockSize());
 		lseek(mc->fd,0,SEEK_SET);
+		// TODO(peb): mmap
 		if (write(mc->fd, hdrbuffer, mc->getHeaderSize()) != static_cast<ssize_t>(mc->getHeaderSize())) {
 			hdd_error_occured(c);   // uses and preserves errno !!!
 			lzfs_silent_errlog(LOG_WARNING,

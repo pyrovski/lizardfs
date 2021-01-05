@@ -64,7 +64,7 @@ OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFile
 	  // If we own the data, we can't modify the iovec because we have to free the
 	  // memory later. If we don't own the data, just modify the iovec; OutBuffers
 	  // don't allow access to bytes behind the first unflushed offset.
-	  const struct iovec & iov = buffers_[unflushedIndex];
+	  struct iovec & iov = buffers_[unflushedIndex];
 	  // Offset within 'iov' of the first unflushed byte.
 	  const size_t iovOffset = bufferUnflushedDataFirstOffset_ - unflushedOffset;
 	  sassert(iovOffset < iov.iov_len);
@@ -72,7 +72,7 @@ OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFile
 		// TODO(peb): if we create iovecs on demand,
 		// we don't need this special handling.
 		const ssize_t expectedBytes = iov.iov_len - iovOffset;
-		const ssize_t bytesWritten = ::write(outputFileDescriptor, iov.iov_base + iovOffset, iov.iov_len - iovOffset);
+		const ssize_t bytesWritten = ::write(outputFileDescriptor, static_cast<const uint8_t*>(iov.iov_base) + iovOffset, iov.iov_len - iovOffset);
 		if (bytesWritten <= 0) {
 		  if (bytesWritten == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
 			return WRITE_AGAIN;
@@ -82,7 +82,7 @@ OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFile
 		bufferUnflushedDataFirstOffset_ += bytesWritten;
 		if (bytesWritten == expectedBytes) {
 		  ++unflushedIndex;
-		  unflushedOffset += iovec.iov_len;
+		  unflushedOffset += iov.iov_len;
 		} // if bytesWritten < expectedBytes, we'll pick up from bufferUnflushedDataFirstOffset_.
 		// bytesWritten < expectedBytes
 		if (retry) {
@@ -90,7 +90,7 @@ OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFile
 		}
 		return WRITE_AGAIN;
 	  } else {
-		iov.iov_base += iovOffset;
+		iov.iov_base = static_cast<uint8_t *>(iov.iov_base) + iovOffset;
 		iov.iov_len -= iovOffset;
 	  }
 	}
@@ -120,16 +120,16 @@ OutputBuffer::WriteStatus OutputBuffer::writeOutToAFileDescriptor(int outputFile
   return WRITE_DONE;
 }
 
-ssize_t mapIntoBuffer(const void *mem, size_t len){
+ssize_t OutputBuffer::mapIntoBuffer(const void *mem, size_t len){
   sassert(owned_.size() == buffers_.size());
-  buffers_.emplace_back(mem, len);
+  buffers_.push_back({const_cast<void*>(mem), len});
   owned_.push_back(false);
   size_ += len;
   return len;
 }
 
-ssize_t mapIntoBuffer(const std::vector<uint8_t> &data) {
-  return mapIntoBuffer(data.data(), sizeof(data.value_type) * data.size());
+ssize_t OutputBuffer::mapIntoBuffer(const std::vector<uint8_t> &data) {
+  return mapIntoBuffer(data.data(), sizeof(uint8_t) * data.size());
 }
 
 size_t OutputBuffer::bytesInABuffer() const {
@@ -137,14 +137,14 @@ size_t OutputBuffer::bytesInABuffer() const {
 }
 
 ssize_t OutputBuffer::copyIntoBuffer(int inputFileDescriptor, size_t len, off_t* offset) {
-  buffers_.emplace_back(malloc(len), len);
-  const struct iovec & iov = buffers_.back();
+  buffers_.push_back({malloc(len), len});
+  struct iovec & iov = buffers_.back();
   sassert(iov.iov_base);
   owned_.emplace_back(true);
   off_t lOffset = offset != nullptr ? *offset : 0;
   size_t bytesRead = 0;
   while (len > 0) {
-	ssize_t ret = pread(inputFileDescriptor, static_cast<uint8_t*>iov.iov_base + bytesRead, len, lOffset);
+	ssize_t ret = pread(inputFileDescriptor, static_cast<uint8_t*>(iov.iov_base) + bytesRead, len, lOffset);
 		if (ret <= 0) {
 		  iov.iov_base = realloc(iov.iov_base, bytesRead);
 		  eassert(iov.iov_base);
@@ -160,7 +160,7 @@ ssize_t OutputBuffer::copyIntoBuffer(int inputFileDescriptor, size_t len, off_t*
 
 ssize_t OutputBuffer::copyIntoBuffer(const void *mem, size_t len) {
   sassert(owned_.size() == buffers_.size());
-  buffers_.emplace_back(malloc(len), len);
+  buffers_.push_back({malloc(len), len});
   const struct iovec & iov = buffers_.back();
   eassert(iov.iov_base);
   owned_.push_back(true);
@@ -169,42 +169,9 @@ ssize_t OutputBuffer::copyIntoBuffer(const void *mem, size_t len) {
   return len;
 }
 
-uint32_t CRC(size_t offset, size_t size) {
-  sassert(bytes > 0);
-  sassert(offset + size <= size_);
-  size_t index = 0;
-  // Virtual offset of buffers_[index].
-  size_t virtualOffset = 0;
-  while (virtualOffset + buffers_[index].iov_len < offset) {
-	virtualOffset += buffers_[index].iov_len;
-	++index;
-  }
-  size_t processed = offset;
-  uint32_t crc = 0;
-  while (processed < offset + size) {
-	const struct iovec &iov = buffers_[index];
-	const size_t bufferOffset = std::max(offset - virtualOffset, 0);
-	// If we need to examine to the end of the indexed buffer
-	if (offset + size >= virtualOffset + iov.iov_len) {
-	  const size_t toProcess = iov.iov_len - bufferOffset;
-	  const uint32_t bufferCRC = mycrc32(iov.iov_base + bufferOffset, toProcess);
-	  crc = mycrc32_combine(crc, bufferCRC, toProcess);
-	  processed += toProcess;
-	} else { // offset + size < virtualOffset + iov.iov_len
-	  const size_t toProcess = offset + size - processed;
-	  const uint32_t bufferCRC = mycrc32(iov.iov_base + bufferOffset, toProcess);
-	  crc = mycrc32_combine(crc, bufferCRC, toProcess);
-	  processed += toProcess;
-	}
-	offset += iov.iov_len;
-	++index;
-  }
-  return crc;
-}
-
 OutputBuffer::~OutputBuffer() {
   sassert(owned_.size() == buffers_.size());
-  for (int i = 0; i < owned_.size(); ++i) {
+  for (unsigned i = 0; i < owned_.size(); ++i) {
 	if (owned_[i]) {
 	  free(buffers_[i].iov_base);
 	}

@@ -21,13 +21,13 @@
 #include "common/platform.h"
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <array>
 
 #include "chunkserver/chunk.h"
 #include "chunkserver/hddspacemgr.h"
 
-#include <unistd.h>
 
 /*!
  * Class representing an open chunk with acquired resources.
@@ -53,14 +53,14 @@ class OpenChunk {
 	if (openFlags & O_RDWR) {
 	  mapFlags |= PROT_WRITE;
 	}
-	/* map_ = mmap(nullptr, statbuf.st_size, mapFlags, MAP_SHARED, fd_, 0); */
-	// TODO(peb): map the maximum size of the chunk so we don't have to remap later.
-	map_ = mmap(nullptr, , mapFlags, MAP_SHARED, fd_, 0);
+	// Map the maximum size of the chunk so we don't have to remap later.
+	const size_t maxSize = chunk->getFileSizeFromBlockCount(MFSBLOCKSINCHUNK);
+	map_ = mmap(nullptr, maxSize, mapFlags, MAP_SHARED, fd_, 0);
 	sassert(map_ != MAP_FAILED);
   }
 
   OpenChunk(OpenChunk &&other) noexcept
-	: chunk_(other.chunk_), fd_(other.fd_), crc_(std::move(other.crc_), map_(other.map_), mapSize_(other.mapSize_) {
+	: chunk_(other.chunk_), fd_(other.fd_), crc_(std::move(other.crc_)), map_(other.map_), mapSize_(other.mapSize_) {
 	other.chunk_ = nullptr;
 	other.fd_ = -1;
 	other.map_ = nullptr;
@@ -68,8 +68,7 @@ class OpenChunk {
   }
   
   OpenChunk(const OpenChunk &other) = delete;
-  operator=(const OpenChunk &rhs) = delete;
-  operator=(OpenChunk &&rhs) = delete;
+  OpenChunk & operator=(const OpenChunk &rhs) = delete;
 
   /*!
    * OpenChunk destructor.
@@ -98,6 +97,19 @@ class OpenChunk {
 	  ::close(fd_);
 	  munmap(map_, mapSize_);
 	}
+  }
+
+  OpenChunk &operator=(OpenChunk &&other) noexcept {
+	chunk_ = other.chunk_;
+	fd_ = other.fd_;
+	crc_ = std::move(other.crc_);
+	map_ = other.map_;
+	mapSize_ = other.mapSize_;
+	other.chunk_ = nullptr;
+	other.fd_ = -1;
+	other.map_ = nullptr;
+	other.mapSize_ = 0;
+	return *this;
   }
 
   /*!
@@ -134,10 +146,10 @@ class OpenChunk {
  private:
   Chunk *chunk_ = nullptr;
   int fd_ = -1;
+  std::unique_ptr<MooseFSChunk::CrcDataContainer> crc_;
   // TODO(peb): track mapped size, which will change as the chunk grows or is
   // truncated. Will need to call mremap().
   // TODO(peb): handle signals that arise from mmap usage.
   void * map_ = nullptr;
   size_t mapSize_ = 0;
-  std::unique_ptr<MooseFSChunk::CrcDataContainer> crc_;
 };

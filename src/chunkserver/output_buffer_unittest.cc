@@ -26,7 +26,7 @@
 #include "unittests/TemporaryDirectory.h"
 
 TEST(OutputBufferTests, outputBuffersTest) {
-	OutputBuffer outputBuffer(512*1024);
+	OutputBuffer outputBuffer;
 
 	int auxPipeFileDescriptors[2];
 
@@ -54,7 +54,6 @@ TEST(OutputBufferTests, outputBuffersTest) {
 		if (status == OutputBuffer::WRITE_DONE) {
 			break;
 		}
-		sleep(1);
 	}
 
 	ASSERT_EQ(read(auxPipeFileDescriptors[0], buf, WRITE_SIZE), WRITE_SIZE) << "errno: " << errno;

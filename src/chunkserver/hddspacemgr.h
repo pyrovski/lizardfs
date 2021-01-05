@@ -27,6 +27,7 @@
 #include "chunkserver/output_buffer.h"
 #include "common/chunk_part_type.h"
 #include "common/chunk_with_version_and_type.h"
+#include "common/lizardfs_error_codes.h"
 #include "protocol/chunks_with_type.h"
 #include "protocol/MFSCommunication.h"
 
@@ -60,9 +61,9 @@ int hdd_open(uint64_t chunkid, ChunkPartType chunkType);
 int hdd_close(uint64_t chunkid, ChunkPartType chunkType);
 int hdd_prefetch_blocks(uint64_t chunkid, ChunkPartType chunkType, uint32_t firstBlock,
 		uint16_t nrOfBlocks);
-int hdd_read(uint64_t chunkid, uint32_t version, ChunkPartType chunkType,
+lizardfs_error_code hdd_read(uint64_t chunkid, uint32_t version, ChunkPartType chunkType,
 		uint32_t offset, uint32_t size, uint32_t maxBlocksToBeReadBehind,
-		uint32_t blocksToBeReadAhead, OutputBuffer* outputBuffer);
+		uint32_t blocksToBeReadAhead, OutputBuffer &outputBuffer);
 int hdd_write(Chunk* chunk, uint32_t version,
 		uint16_t blocknum, uint32_t offset, uint32_t size, uint32_t crc, const uint8_t* buffer);
 int hdd_write(uint64_t chunkid, uint32_t version, ChunkPartType chunkType,

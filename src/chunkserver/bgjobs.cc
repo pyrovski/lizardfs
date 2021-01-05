@@ -87,6 +87,7 @@ struct chunk_read_args {
 	uint8_t *crcbuff;
 	uint32_t maxBlocksToBeReadBehind;
 	uint32_t blocksToBeReadAhead;
+  // TODO(peb): This wouldn't need to be a pointer if OutputBuffer had a move constructor.
 	OutputBuffer* outputBuffer;
 	bool performHddOpen;
 };
@@ -256,10 +257,9 @@ void* job_worker(void *th_arg) {
 					}
 				}
 
-				// TODO(peb): mmap
 				status = hdd_read(rdargs->chunkid, rdargs->version, rdargs->chunkType,
 						rdargs->offset, rdargs->size, rdargs->maxBlocksToBeReadBehind,
-						rdargs->blocksToBeReadAhead, rdargs->outputBuffer);
+						rdargs->blocksToBeReadAhead, *rdargs->outputBuffer);
 
 				if (rdargs->performHddOpen && status != LIZARDFS_STATUS_OK) {
 					int ret = hdd_close(rdargs->chunkid, rdargs->chunkType);

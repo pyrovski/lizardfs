@@ -66,8 +66,7 @@ uint32_t ChunkReplicator::getChunkBlocks(uint64_t chunk_id, uint32_t chunk_versi
 		assert(slice_traits::isStandard(chunk_type));
 		serializeMooseFsPacket(output_buffer, CSTOCS_GET_CHUNK_BLOCKS, chunk_id, chunk_version);
 	}
-	// TODO(peb): handle and log errors here
-	tcptowrite(fd, output_buffer, 1000);
+	tcptowrite(fd, output_buffer.data(), output_buffer.size(), 1000);
 
 	std::vector<uint8_t> input_buffer;
 	PacketHeader header;

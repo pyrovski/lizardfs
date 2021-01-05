@@ -43,35 +43,27 @@ public:
 
 	// Maps data into the buffer without copying.
 	// Mapped data must outlive the buffer.
+	// Returns the number of bytes mapped.
 	ssize_t mapIntoBuffer(const void *mem, size_t len);
 
+	// Maps data into the buffer without copying.
+	// Mapped data must outlive the buffer.
+	// Returns the number of bytes mapped.
 	ssize_t mapIntoBuffer(const std::vector<uint8_t> &data);
 
 	// Copies (appends) 'len' bytes at offset 'offset' from 'inputFileDescriptor'.
-	// Returns the number of bytes written.
+	// Returns the number of bytes copied.
 	// Prefer mapping extant data over copying.
-	// TODO(peb): is this ever called with non-nullptr 'offset'? The function
-	// was broken for short reads.
+	// TODO(peb): This function was broken for short reads with non-nullptr 'offset'; add a test.
 	ssize_t copyIntoBuffer(int inputFileDescriptor, size_t len, off_t* offset);
 
-	// Returns the number of bytes written.
+	// Returns the number of bytes copied.
 	ssize_t copyIntoBuffer(const void *mem, size_t len);
-
-	// TODO(peb): this function is only called from hdd_read_crc_and_block();
-	// it can be simplified after hdd_read_crc_and_block() is rewritten
-	// for mmap(). hdd_read_crc_and_block() only calls checkCRC() on full blocks.
-	// Returns whether the CRC32 of the 'bytes' bytes at 'bufferUnflushedDataFirstOffset_' matches 'crc'.
-	//bool checkCRC(size_t bytes, uint32_t crc) const;
 
 	// Returns the number of bytes copied; i.e., the length of 'mem'.
 	ssize_t copyIntoBuffer(const std::vector<uint8_t>& mem) {
 		return copyIntoBuffer(mem.data(), mem.size());
 	}
-
-	// Computes the CRC32 of the specified buffer data. Uses 'size' bytes starting at 'offset'.
-	// Not affected by bufferUnflushedDataFirstOffset_.
-	// TODO(peb): This function is not necessary after conversion to mmap()
-	uint32_t CRC(size_t offset, size_t size) const;
 
 	// Writes buffer data to file descriptor. If 'retry' is true, will issue
 	// multiple writes as necessary. If 'retry' is false, returns WRITE_AGAIN on
@@ -80,11 +72,6 @@ public:
 
 	// Returns the number of unflushed bytes in the buffer.
 	size_t bytesInABuffer() const;
-
-	// TODO(peb): remove; used in hdd_read().
-	const uint8_t* data() const {
-	  return buffer_.data();
-	}
 
 private:
 	std::vector<struct iovec> buffers_;
