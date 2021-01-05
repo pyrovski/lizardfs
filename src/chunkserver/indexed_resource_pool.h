@@ -62,7 +62,6 @@ public:
 	 * \brief Acquire existing resource.
 	 *
 	 * \param id Resource's index.
-	 * \param data Resource passed as rvalue reference.
 	 */
 	void acquire(int id) {
 		if (id < kNullId) {
