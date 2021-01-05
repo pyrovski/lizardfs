@@ -36,7 +36,7 @@
 #define STATSHISTORY (24*60)
 #define LASTERRSIZE 30
 
-// Block data and crc summaric size.
+// Block data and CRC32 checksum size.
 constexpr uint32_t kHddBlockSize = MFSBLOCKSIZE + 4;
 
 enum ChunkState {
@@ -148,7 +148,7 @@ protected:
 public:
 	uint8_t validattr;
 	uint8_t todel;
-	uint8_t state;
+	uint8_t state; // ChunkState
 	uint8_t wasChanged;
 };
 
