@@ -1481,9 +1481,9 @@ void worker_write(csserventry *eptr) {
 			return;
 		}
 		if (pack->outputBuffer) {
-			size_t bytesInBufferBefore = pack->outputBuffer->bytesInABuffer();
-			OutputBuffer::WriteStatus ret = pack->outputBuffer->writeOutToAFileDescriptor(eptr->sock);
-			size_t bytesInBufferAfter = pack->outputBuffer->bytesInABuffer();
+			const size_t bytesInBufferBefore = pack->outputBuffer->bytesInABuffer();
+			const OutputBuffer::WriteStatus ret = pack->outputBuffer->writeOutToAFileDescriptor(eptr->sock);
+			const size_t bytesInBufferAfter = pack->outputBuffer->bytesInABuffer();
 			massert(bytesInBufferAfter <= bytesInBufferBefore,
 					"New bytes in pack->outputBuffer after sending some data");
 			stats_bytesout += (bytesInBufferBefore - bytesInBufferAfter);
