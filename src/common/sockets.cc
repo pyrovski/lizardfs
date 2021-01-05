@@ -647,34 +647,6 @@ int32_t tcptowrite(int sock, const void *buff, uint32_t leng, int msecto) {
 	}
 	return sent;
 }
-
-ssize_t tcptowrite(int sock, OutputBuffer& buff, int msecto) {
-  size_t sent = 0;
-  struct pollfd pfd;
-  pfd.fd = sock;
-  pfd.events = POLLOUT;
-  size_t initialBufferSize = buffer.bytesInABuffer();
-  while (sent < leng) {
-	pfd.revents = 0;
-	if (tcppoll(pfd, msecto) < 0) {
-	  return -1;
-	}
-	if (pfd.revents & POLLOUT) {
-	  const OutputBuffer::WriteStatus writeStatus = buffer.writeOutToAFileDescriptor(sock, false);
-	  switch (writeStatus) {
-	  case OutputBuffer::WRITE_ERROR:
-		return -1;
-	  case OutputBuffer::WRITE_AGAIN:
-		continue;
-	  case OutputBuffer::WRITE_DONE:
-		break;
-	  } else {
-		tcpsetlasterror(TCPETIMEDOUT);
-		return -1;
-	  }
-	}
-  return buffer.bytesInABuffer() - initialBufferSize;
-}
  
 int tcptoaccept(int sock, uint32_t msecto) {
 	struct pollfd pfd;
